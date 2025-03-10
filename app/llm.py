@@ -7,6 +7,7 @@ from openai import (
     AuthenticationError,
     OpenAIError,
     RateLimitError,
+    OpenAI,
 )
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
@@ -40,6 +41,7 @@ class LLM:
             self.api_key = llm_config.api_key
             self.api_version = llm_config.api_version
             self.base_url = llm_config.base_url
+            self.max_context_length = llm_config.max_context_length
             if self.api_type == "azure":
                 self.client = AsyncAzureOpenAI(
                     base_url=self.base_url,
@@ -47,54 +49,30 @@ class LLM:
                     api_version=self.api_version,
                 )
             else:
-                self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+                self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
-    @staticmethod
-    def format_messages(messages: List[Union[dict, Message]]) -> List[dict]:
-        """
-        Format messages for LLM by converting them to OpenAI message format.
-
-        Args:
-            messages: List of messages that can be either dict or Message objects
-
-        Returns:
-            List[dict]: List of formatted messages in OpenAI format
-
-        Raises:
-            ValueError: If messages are invalid or missing required fields
-            TypeError: If unsupported message types are provided
-
-        Examples:
-            >>> msgs = [
-            ...     Message.system_message("You are a helpful assistant"),
-            ...     {"role": "user", "content": "Hello"},
-            ...     Message.user_message("How are you?")
-            ... ]
-            >>> formatted = LLM.format_messages(msgs)
-        """
+    def format_messages(self, messages: List[Union[dict, Message]]) -> List[dict]:
+        """Format messages for API call, ensuring they don't exceed context length."""
         formatted_messages = []
-
-        for message in messages:
-            if isinstance(message, dict):
-                # If message is already a dict, ensure it has required fields
-                if "role" not in message:
-                    raise ValueError("Message dict must contain 'role' field")
-                formatted_messages.append(message)
-            elif isinstance(message, Message):
-                # If message is a Message object, convert it to dict
-                formatted_messages.append(message.to_dict())
+        total_tokens = 0
+        
+        for msg in messages:
+            if isinstance(msg, Message):
+                msg_dict = msg.model_dump()
             else:
-                raise TypeError(f"Unsupported message type: {type(message)}")
-
-        # Validate all messages have required fields
-        for msg in formatted_messages:
-            if msg["role"] not in ["system", "user", "assistant", "tool"]:
-                raise ValueError(f"Invalid role: {msg['role']}")
-            if "content" not in msg and "tool_calls" not in msg:
-                raise ValueError(
-                    "Message must contain either 'content' or 'tool_calls'"
-                )
-
+                msg_dict = msg
+                
+            # 估算每个消息的 token 数量（简单估算：1个token ≈ 4个字符）
+            msg_tokens = len(str(msg_dict.get("content", ""))) // 4
+            
+            # 如果添加这条消息会超过限制，就停止添加
+            if total_tokens + msg_tokens > self.max_context_length:
+                logger.warning(f"Message context exceeded {self.max_context_length} tokens, truncating...")
+                break
+                
+            formatted_messages.append(msg_dict)
+            total_tokens += msg_tokens
+            
         return formatted_messages
 
     @retry(
@@ -191,32 +169,13 @@ class LLM:
         temperature: Optional[float] = None,
         **kwargs,
     ):
-        """
-        Ask LLM using functions/tools and return the response.
-
-        Args:
-            messages: List of conversation messages
-            system_msgs: Optional system messages to prepend
-            timeout: Request timeout in seconds
-            tools: List of tools to use
-            tool_choice: Tool choice strategy
-            temperature: Sampling temperature for the response
-            **kwargs: Additional completion arguments
-
-        Returns:
-            ChatCompletionMessage: The model's response
-
-        Raises:
-            ValueError: If tools, tool_choice, or messages are invalid
-            OpenAIError: If API call fails after retries
-            Exception: For unexpected errors
-        """
+        """Ask LLM using functions/tools and return the response."""
         try:
             # Validate tool_choice
             if tool_choice not in ["none", "auto", "required"]:
                 raise ValueError(f"Invalid tool_choice: {tool_choice}")
 
-            # Format messages
+            # Format messages with length limit
             if system_msgs:
                 system_msgs = self.format_messages(system_msgs)
                 messages = system_msgs + self.format_messages(messages)
