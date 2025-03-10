@@ -7,7 +7,6 @@ from openai import (
     AuthenticationError,
     OpenAIError,
     RateLimitError,
-    OpenAI,
 )
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
@@ -49,7 +48,7 @@ class LLM:
                     api_version=self.api_version,
                 )
             else:
-                self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+                self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
 
     def format_messages(self, messages: List[Union[dict, Message]]) -> List[dict]:
         """Format messages for API call, ensuring they don't exceed context length."""
