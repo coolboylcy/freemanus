@@ -4,6 +4,13 @@
     {
       "src": "web/backend/api.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "web/frontend/package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "build"
+      }
     }
   ],
   "routes": [
