@@ -2,10 +2,7 @@ import asyncio
 import json
 from typing import Optional
 
-from browser_use import Browser as BrowserUseBrowser
-from browser_use import BrowserConfig
-from browser_use.browser.context import BrowserContext
-from browser_use.dom.service import DomService
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from pydantic import Field, field_validator
 from pydantic_core.core_schema import ValidationInfo
 
@@ -21,7 +18,6 @@ content extraction, and tab management. Supported actions include:
 - 'screenshot': Capture a screenshot
 - 'get_html': Get page HTML content
 - 'get_text': Get text content of the page
-- 'read_links': Get all links on the page
 - 'execute_js': Execute JavaScript code
 - 'scroll': Scroll the page
 - 'switch_tab': Switch to a specific tab
@@ -90,9 +86,10 @@ class BrowserUseTool(BaseTool):
     }
 
     lock: asyncio.Lock = Field(default_factory=asyncio.Lock)
-    browser: Optional[BrowserUseBrowser] = Field(default=None, exclude=True)
+    browser: Optional[Browser] = Field(default=None, exclude=True)
     context: Optional[BrowserContext] = Field(default=None, exclude=True)
-    dom_service: Optional[DomService] = Field(default=None, exclude=True)
+    page: Optional[Page] = Field(default=None, exclude=True)
+    playwright: Optional[any] = Field(default=None, exclude=True)
 
     @field_validator("parameters", mode="before")
     def validate_parameters(cls, v: dict, info: ValidationInfo) -> dict:
@@ -102,11 +99,11 @@ class BrowserUseTool(BaseTool):
 
     async def _ensure_browser_initialized(self) -> BrowserContext:
         """Ensure browser and context are initialized."""
-        if self.browser is None:
-            self.browser = BrowserUseBrowser(BrowserConfig(headless=False))
-        if self.context is None:
+        if not self.browser:
+            self.playwright = await async_playwright().start()
+            self.browser = await self.playwright.chromium.launch()
             self.context = await self.browser.new_context()
-            self.dom_service = DomService(await self.context.get_current_page())
+            self.page = await self.context.new_page()
         return self.context
 
     async def execute(
@@ -138,67 +135,55 @@ class BrowserUseTool(BaseTool):
         """
         async with self.lock:
             try:
-                context = await self._ensure_browser_initialized()
+                await self._ensure_browser_initialized()
 
                 if action == "navigate":
                     if not url:
                         return ToolResult(error="URL is required for 'navigate' action")
-                    await context.navigate_to(url)
+                    await self.page.goto(url)
                     return ToolResult(output=f"Navigated to {url}")
 
                 elif action == "click":
                     if index is None:
                         return ToolResult(error="Index is required for 'click' action")
-                    element = await context.get_dom_element_by_index(index)
-                    if not element:
-                        return ToolResult(error=f"Element with index {index} not found")
-                    download_path = await context._click_element_node(element)
-                    output = f"Clicked element at index {index}"
-                    if download_path:
-                        output += f" - Downloaded file to {download_path}"
-                    return ToolResult(output=output)
+                    elements = await self.page.query_selector_all("*")
+                    if 0 <= index < len(elements):
+                        await elements[index].click()
+                        return ToolResult(output="Click successful")
+                    return ToolResult(error="Element not found")
 
                 elif action == "input_text":
                     if index is None or not text:
                         return ToolResult(
                             error="Index and text are required for 'input_text' action"
                         )
-                    element = await context.get_dom_element_by_index(index)
-                    if not element:
-                        return ToolResult(error=f"Element with index {index} not found")
-                    await context._input_text_element_node(element, text)
-                    return ToolResult(
-                        output=f"Input '{text}' into element at index {index}"
-                    )
+                    elements = await self.page.query_selector_all("*")
+                    if 0 <= index < len(elements):
+                        await elements[index].fill(text)
+                        return ToolResult(
+                            output=f"Input '{text}' into element at index {index}"
+                        )
+                    return ToolResult(error="Element not found")
 
                 elif action == "screenshot":
-                    screenshot = await context.take_screenshot(full_page=True)
-                    return ToolResult(
-                        output=f"Screenshot captured (base64 length: {len(screenshot)})",
-                        system=screenshot,
-                    )
+                    await self.page.screenshot(path="screenshot.png")
+                    return ToolResult(output="Screenshot saved")
 
                 elif action == "get_html":
-                    html = await context.get_page_html()
+                    html = await self.page.content()
                     truncated = html[:2000] + "..." if len(html) > 2000 else html
                     return ToolResult(output=truncated)
 
                 elif action == "get_text":
-                    text = await context.execute_javascript("document.body.innerText")
+                    text = await self.page.text_content("*")
                     return ToolResult(output=text)
-
-                elif action == "read_links":
-                    links = await context.execute_javascript(
-                        "document.querySelectorAll('a[href]').forEach((elem) => {if (elem.innerText) {console.log(elem.innerText, elem.href)}})"
-                    )
-                    return ToolResult(output=links)
 
                 elif action == "execute_js":
                     if not script:
                         return ToolResult(
                             error="Script is required for 'execute_js' action"
                         )
-                    result = await context.execute_javascript(script)
+                    result = await self.page.evaluate(script)
                     return ToolResult(output=str(result))
 
                 elif action == "scroll":
@@ -206,9 +191,7 @@ class BrowserUseTool(BaseTool):
                         return ToolResult(
                             error="Scroll amount is required for 'scroll' action"
                         )
-                    await context.execute_javascript(
-                        f"window.scrollBy(0, {scroll_amount});"
-                    )
+                    await self.page.evaluate(f"window.scrollBy(0, {scroll_amount})")
                     direction = "down" if scroll_amount > 0 else "up"
                     return ToolResult(
                         output=f"Scrolled {direction} by {abs(scroll_amount)} pixels"
@@ -219,21 +202,21 @@ class BrowserUseTool(BaseTool):
                         return ToolResult(
                             error="Tab ID is required for 'switch_tab' action"
                         )
-                    await context.switch_to_tab(tab_id)
+                    await self.context.switch_to_tab(tab_id)
                     return ToolResult(output=f"Switched to tab {tab_id}")
 
                 elif action == "new_tab":
                     if not url:
                         return ToolResult(error="URL is required for 'new_tab' action")
-                    await context.create_new_tab(url)
+                    await self.context.create_new_tab(url)
                     return ToolResult(output=f"Opened new tab with URL {url}")
 
                 elif action == "close_tab":
-                    await context.close_current_tab()
+                    await self.context.close_current_tab()
                     return ToolResult(output="Closed current tab")
 
                 elif action == "refresh":
-                    await context.refresh_page()
+                    await self.page.reload()
                     return ToolResult(output="Refreshed current page")
 
                 else:
@@ -246,28 +229,25 @@ class BrowserUseTool(BaseTool):
         """Get the current browser state as a ToolResult."""
         async with self.lock:
             try:
-                context = await self._ensure_browser_initialized()
-                state = await context.get_state()
-                state_info = {
-                    "url": state.url,
-                    "title": state.title,
-                    "tabs": [tab.model_dump() for tab in state.tabs],
-                    "interactive_elements": state.element_tree.clickable_elements_to_string(),
-                }
-                return ToolResult(output=json.dumps(state_info))
+                if not self.page:
+                    return ToolResult(content="Browser not initialized")
+                url = self.page.url
+                title = await self.page.title()
+                return ToolResult(content=f"Current URL: {url}\nPage title: {title}")
             except Exception as e:
                 return ToolResult(error=f"Failed to get browser state: {str(e)}")
 
     async def cleanup(self):
         """Clean up browser resources."""
         async with self.lock:
-            if self.context is not None:
+            if self.page:
+                await self.page.close()
+            if self.context:
                 await self.context.close()
-                self.context = None
-                self.dom_service = None
-            if self.browser is not None:
+            if self.browser:
                 await self.browser.close()
-                self.browser = None
+            if self.playwright:
+                await self.playwright.stop()
 
     def __del__(self):
         """Ensure cleanup when object is destroyed."""

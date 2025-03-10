@@ -1,5 +1,5 @@
 import threading
-import tomllib
+import tomli
 from pathlib import Path
 from typing import Dict
 
@@ -63,7 +63,7 @@ class Config:
     def _load_config(self) -> dict:
         config_path = self._get_config_path()
         with config_path.open("rb") as f:
-            return tomllib.load(f)
+            return tomli.load(f)
 
     def _load_initial_config(self):
         raw_config = self._load_config()

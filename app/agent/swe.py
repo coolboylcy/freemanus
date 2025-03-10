@@ -16,15 +16,20 @@ class SWEAgent(ToolCallAgent):
     system_prompt: str = SYSTEM_PROMPT
     next_step_prompt: str = NEXT_STEP_TEMPLATE
 
-    available_tools: ToolCollection = ToolCollection(
-        Bash(), StrReplaceEditor(), Terminate()
-    )
+    available_tools: ToolCollection = Field(default_factory=lambda: ToolCollection(
+        Bash(), Terminate()
+    ))
     special_tool_names: List[str] = Field(default_factory=lambda: [Terminate().name])
 
     max_steps: int = 30
 
     bash: Bash = Field(default_factory=Bash)
     working_dir: str = "."
+    str_replace_editor: StrReplaceEditor = Field(default_factory=lambda: StrReplaceEditor(file_path=""))
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        self.available_tools.tools.append(self.str_replace_editor)
 
     async def think(self) -> bool:
         """Process current state and decide next action"""
